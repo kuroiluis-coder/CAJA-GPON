@@ -1,0 +1,990 @@
+/* Cajas GPON — lógica principal */
+(function () {
+  'use strict';
+  const $ = s => document.querySelector(s);
+  const D2R = Math.PI / 180;
+
+  /* ---------- iconos ---------- */
+  const ICONS = {
+    menu: 'M4 7h16M4 12h16M4 17h10', search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3',
+    locate: 'M12 3v3M12 18v3M3 12h3M18 12h3M12 16.5a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9z',
+    layers: 'M12 3l9 5-9 5-9-5 9-5zM3 12.5l9 5 9-5M3 16.5l9 5 9-5',
+    ruler: 'M3.5 16.5l13-13 4 4-13 13-4-4zM8 8l2.5 2.5M11 5l2 2M5 11l2 2M13 13l2.5 2.5',
+    plus: 'M12 5v14M5 12h14', x: 'M6 6l12 12M18 6L6 18',
+    nav: 'M3.5 11.2l16-7.2-7.2 16-2.2-6.6-6.6-2.2z', pin: 'M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21zM12 12a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
+    edit: 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4', trash: 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13M10 11v6M14 11v6',
+    copy: 'M9 9h11v11H9zM5 15V4h11', share: 'M12 15V3M7 8l5-5 5 5M5 14v6h14v-6',
+    download: 'M12 3v12M7 10l5 5 5-5M5 20h14', upload: 'M12 16V4M7 9l5-5 5 5M5 20h14',
+    map: 'M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14', moon: 'M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z',
+    check: 'M5 12.5l5 5 9-10', undo: 'M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
+    reset: 'M4 4v6h6M20 20v-6h-6M20 9A8 8 0 0 0 6 6L4 10M4 15a8 8 0 0 0 14 3l2-4',
+    cloud: 'M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 20 10a4 4 0 0 1-1 8M12 11v7M9 15l3 3 3-3',
+    offline: 'M3 3l18 18M9 9a8 8 0 0 0-5 3M5.5 15.5a8 8 0 0 1 4-2M12 19.5h.01M15 11a8 8 0 0 1 5 2M17 14.5a5 5 0 0 0-2-.8',
+    app: 'M12 3v11M8 10l4 4 4-4M4 17v3h16v-3', box: 'M4 8l8-4 8 4v8l-8 4-8-4V8zM4 8l8 4 8-4M12 12v8'
+  };
+  function hydrate(root) {
+    (root || document).querySelectorAll('i[data-i]').forEach(el => {
+      if (!el.firstChild) el.innerHTML = '<svg viewBox="0 0 24 24"><path d="' + (ICONS[el.dataset.i] || '') + '"/></svg>';
+    });
+  }
+  const ic = n => '<i data-i="' + n + '"></i>';
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const norm = s => String(s || '').toUpperCase().replace(/\s+/g, '');
+
+  /* ---------- estado ---------- */
+  const SETTINGS_KEY = 'cajas.settings.v1';
+  const S = {
+    feats: [], pts: [], areas: [], lines: [], nextId: 1, sel: null, selAreas: [], pos: null,
+    layers: { cajas: true, areas: true, rutas: true, etiquetas: true }, base: 'dark', theme: 'dark', themeMode: 'auto',
+    radius: 1000, follow: false, userMoved: false, centered: false, meas: { on: false, pts: [] }, pick: null,
+    showLine: true, groups: new Map(), munis: new Map(), seedName: 'GLOBAL ZONA NORTE 1'
+  };
+  try { Object.assign(S, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'), { sel: null }); } catch (e) { }
+  function saveSettings() {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify({ layers: S.layers, base: S.base, theme: S.theme, themeMode: S.themeMode, radius: S.radius, gkey: S.gkey || '' })); } catch (e) { }
+  }
+
+  const BASES = {
+    dark: { label: 'Oscuro', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19, filter: 'invert(1) hue-rotate(180deg) brightness(.92) contrast(.95) saturate(.8)', attr: '© OpenStreetMap', bg: '#0b1220', grid: 'rgba(255,255,255,.045)' },
+    light: { label: 'Calles', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19, attr: '© OpenStreetMap', bg: '#e9edf2', grid: 'rgba(20,30,50,.06)' },
+    sat: { label: 'Satélite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom: 19, attr: 'Esri, Maxar, Earthstar Geographics', bg: '#101820', grid: 'rgba(255,255,255,.05)' },
+    gmap: { label: 'Google Maps · Mapa', google: true, gtype: 'roadmap', attr: '' },
+    gsat: { label: 'Google Maps · Satélite', google: true, gtype: 'hybrid', attr: '' },
+    vec: { label: 'Calles sin conexión', vector: true, attr: '© OpenStreetMap · Protomaps' },
+    none: { label: 'Sin mapa (solo datos)', url: null, attr: 'Modo sin mapa base', bg: null, grid: null }
+  };
+
+  let COL = {};
+  function readColors() {
+    const cs = getComputedStyle(document.documentElement), v = n => cs.getPropertyValue(n).trim();
+    COL = { accent: v('--accent'), node: v('--node'), nueva: v('--new'), user: v('--user'), text: v('--text'), bg: v('--bg'), solid: v('--solid') };
+  }
+  function applyTheme() {
+    document.documentElement.dataset.theme = S.theme;
+    const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = S.theme === 'light' ? '#e8edf3' : '#0b1220';
+    readColors(); if (VEC) VEC.setTheme(S.theme);
+    const b = BASES[S.base] || BASES.dark;
+    map.bg = b.bg || (S.theme === 'light' ? '#e8edf3' : '#0b1220');
+    map.grid = b.grid || (S.theme === 'light' ? 'rgba(20,30,50,.07)' : 'rgba(255,255,255,.05)');
+    map.invalidate();
+  }
+  /* ---------- tema automático según el sol ---------- */
+  function sunTimes(date, lat, lon) {
+    const R = Math.PI / 180, DAY = 864e5, J1970 = 2440588, J2000 = 2451545, E = R * 23.4397, J0 = 0.0009;
+    const days = date.getTime() / DAY - 0.5 + J1970 - J2000, lw = R * -lon, phi = R * lat;
+    const n = Math.round(days - J0 - lw / (2 * Math.PI)), ds = J0 + (0 + lw) / (2 * Math.PI) + n;
+    const M = R * (357.5291 + 0.98560028 * ds);
+    const L = M + R * (1.9148 * Math.sin(M) + 0.02 * Math.sin(2 * M) + 0.0003 * Math.sin(3 * M)) + R * 102.9372 + Math.PI;
+    const dec = Math.asin(Math.sin(E) * Math.sin(L));
+    const Jn = J2000 + ds + 0.0053 * Math.sin(M) - 0.0069 * Math.sin(2 * L);
+    const w = Math.acos(Math.max(-1, Math.min(1, (Math.sin(-0.833 * R) - Math.sin(phi) * Math.sin(dec)) / (Math.cos(phi) * Math.cos(dec)))));
+    const a = J0 + (w + lw) / (2 * Math.PI) + n, Js = J2000 + a + 0.0053 * Math.sin(M) - 0.0069 * Math.sin(2 * L), Jr = Jn - (Js - Jn);
+    const toD = j => new Date((j + 0.5 - J1970) * DAY);
+    return { rise: toD(Jr), set: toD(Js) };
+  }
+  function autoTheme() {
+    let th = S.themeMode;
+    if (th === 'auto') {
+      const p = S.pos ? { lat: S.pos.lat, lon: S.pos.lon } : { lat: 13.5, lon: -86.3 };
+      const t = sunTimes(new Date(), p.lat, p.lon), now = Date.now();
+      th = now >= t.rise.getTime() && now < t.set.getTime() ? 'light' : 'dark';
+    }
+    const baseWas = S.base, themeWas = S.theme;
+    S.theme = th;
+    if (S.base === 'dark' || S.base === 'light') S.base = th === 'dark' ? 'dark' : 'light';
+    if (S.base !== baseWas) applyBase(); else if (S.theme !== themeWas) applyTheme();
+  }
+  const THEME_LABEL = { auto: 'Automático (sol)', light: 'Claro', dark: 'Oscuro' };
+
+  /* ---------- Google Maps ---------- */
+  const NB = window.AndroidBridge || null;
+  let gmap = null, gLoading = null;
+  function loadGoogle(key) {
+    if (window.google && window.google.maps) return Promise.resolve();
+    if (gLoading) return gLoading;
+    gLoading = new Promise((res, rej) => {
+      window.__gmReady = () => res();
+      window.gm_authFailure = () => { toast('La clave de Google Maps no es válida o no tiene activada “Maps JavaScript API”', 5000); if (BASES[S.base] && BASES[S.base].google) { S.base = 'dark'; saveSettings(); } applyBase(); };
+      const sc = document.createElement('script');
+      sc.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key) + '&callback=__gmReady&v=weekly&language=es';
+      sc.onerror = () => { gLoading = null; rej(new Error('red')); };
+      setTimeout(() => { if (!(window.google && window.google.maps)) { gLoading = null; rej(new Error('tiempo')); } }, 15000);
+      document.head.appendChild(sc);
+    });
+    return gLoading;
+  }
+  async function useGoogle(type) {
+    if (!S.gkey) { askKey(); return false; }
+    if (!navigator.onLine) { toast('Sin internet: se usa el mapa propio', 3000); return false; }
+    try { await loadGoogle(S.gkey); } catch (e) { toast('No se pudo cargar Google Maps', 3000); return false; }
+    if (!gmap) {
+      const c = map.center();
+      gmap = new google.maps.Map($('#gmap'), { center: { lat: c.lat, lng: c.lon }, zoom: Math.round(map.z), disableDefaultUI: true, gestureHandling: 'greedy', clickableIcons: false, keyboardShortcuts: false, mapTypeId: type });
+      $('#gmap').hidden = false; map.attachGoogle(gmap);
+    } else { $('#gmap').hidden = false; gmap.setMapTypeId(type); map.attachGoogle(gmap); }
+    return true;
+  }
+  function askKey() {
+    const m = modal('<h3>Clave de Google Maps</h3><p class="lead">Para usar el mapa oficial de Google necesitas una clave API de tu cuenta de Google Cloud con “Maps JavaScript API” activada. Pégala aquí; se guarda solo en este teléfono.</p>' +
+      '<label class="field"><span>CLAVE API</span><input id="gK" value="' + esc(S.gkey || '') + '" placeholder="AIza…" autocomplete="off" autocapitalize="off" spellcheck="false"></label>' +
+      '<div class="btnrow"><button class="btn" id="gC">' + (S.gkey ? 'Quitar clave' : 'Cancelar') + '</button><button class="btn accent" id="gS">' + ic('check') + 'Guardar</button></div>');
+    hydrate(m);
+    m.querySelector('#gC').onclick = () => { if (S.gkey) { S.gkey = ''; if (BASES[S.base].google) S.base = 'dark'; saveSettings(); applyBase(); } closeModal(); };
+    m.querySelector('#gS').onclick = () => {
+      const v = m.querySelector('#gK').value.trim(); if (v.length < 20) { toast('La clave parece incompleta'); return; }
+      S.gkey = v; saveSettings(); closeModal(); if (!BASES[S.base].google) S.base = 'gmap'; saveSettings(); applyBase();
+    };
+  }
+  /* ---------- mapa de calles sin conexión (vectorial) ---------- */
+  const VEC_URL = 'mapa/norte.pmtiles';
+  let VEC = null, vecTried = false;
+  async function ensureVector() {
+    if (!vecTried) { vecTried = true; VEC = await Vec.openVector(VEC_URL); }
+    if (VEC) VEC.setTheme(S.theme === 'light' ? 'light' : 'dark');
+    return !!VEC;
+  }
+  const isOffline = () => !navigator.onLine || S.netBad;
+  let lastMode = '';
+  async function applyBase() {
+    let b = BASES[S.base] || BASES.dark;
+    const auto = isOffline() && !b.vector;
+    if (b.vector || auto) {
+      if (await ensureVector()) {
+        if (gmap) { map.detachGoogle(); $('#gmap').hidden = true; }
+        map.setSource(null); map.setVector(VEC); $('#attrib').textContent = BASES.vec.attr; applyTheme();
+        if (auto && lastMode !== 'vec-auto') toast('Sin conexión: se activó el mapa de calles sin internet', 3500);
+        lastMode = auto ? 'vec-auto' : 'vec'; return;
+      }
+      if (b.vector) { toast('Esta versión no trae el mapa de calles sin conexión', 4000); b = BASES.dark; }
+    }
+    map.setVector(null);
+    if (lastMode === 'vec-auto' && !auto) toast('Conexión recuperada: mapa en línea', 2500);
+    lastMode = 'online';
+    if (b.google) {
+      if (await useGoogle(b.gtype)) { map.setSource(null); $('#attrib').textContent = ''; applyTheme(); return; }
+      b = BASES.dark;
+    }
+    if (gmap) { map.detachGoogle(); $('#gmap').hidden = true; }
+    map.setSource(b.url ? { url: b.url, maxZoom: b.maxZoom, minZoom: 0, filter: b.filter || '' } : null);
+    $('#attrib').textContent = b.attr; applyTheme();
+  }
+  /* ---------- utilidades geográficas ---------- */
+  function hav(lat1, lon1, lat2, lon2) {
+    const dLat = (lat2 - lat1) * D2R, dLon = (lon2 - lon1) * D2R;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * D2R) * Math.cos(lat2 * D2R) * Math.sin(dLon / 2) ** 2;
+    return 12742000 * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  const lengthM = c => { let s = 0; for (let i = 1; i < c.length; i++) s += hav(c[i - 1][1], c[i - 1][0], c[i][1], c[i][0]); return s; };
+  function ringArea(r) {
+    const lat0 = r[0][1] * D2R, kx = 111320 * Math.cos(lat0), ky = 110574; let a = 0;
+    for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += (p[0] * kx) * (q[1] * ky) - (q[0] * kx) * (p[1] * ky); }
+    return Math.abs(a) / 2;
+  }
+  function bearing(lat1, lon1, lat2, lon2) {
+    const y = Math.sin((lon2 - lon1) * D2R) * Math.cos(lat2 * D2R);
+    const x = Math.cos(lat1 * D2R) * Math.sin(lat2 * D2R) - Math.sin(lat1 * D2R) * Math.cos(lat2 * D2R) * Math.cos((lon2 - lon1) * D2R);
+    return (Math.atan2(y, x) / D2R + 360) % 360;
+  }
+  const CARD = ['norte', 'noreste', 'este', 'sureste', 'sur', 'suroeste', 'oeste', 'noroeste'];
+  const cardinal = b => CARD[Math.round(b / 45) % 8];
+  function fmtD(m) {
+    if (m == null || !isFinite(m)) return '—';
+    if (m < 1000) return Math.round(m) + ' m';
+    return (m / 1000).toFixed(m < 10000 ? 2 : 1) + ' km';
+  }
+  const fmtA = m2 => m2 >= 1e6 ? (m2 / 1e6).toFixed(2) + ' km²' : Math.round(m2).toLocaleString('es') + ' m²';
+  function pip(x, y, r) {
+    let inside = false;
+    for (let i = 0, j = r.length - 2; i < r.length; i += 2) {
+      const xi = r[i], yi = r[i + 1], xj = r[j], yj = r[j + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+      j = i;
+    }
+    return inside;
+  }
+
+  /* ---------- puente con la app Android (si existe) ---------- */
+  function openExt(url, fallback) { if (NB) NB.openExternal(url, fallback || ''); else window.open(fallback || url, '_blank', 'noopener'); }
+  function saveBlob(blob, name, share) {
+    if (NB) {
+      const fr = new FileReader();
+      fr.onload = () => NB.saveFile(name, String(fr.result).split(',')[1], blob.type || 'application/octet-stream', !!share);
+      fr.readAsDataURL(blob); return;
+    }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+  }
+
+  /* ---------- UI helpers ---------- */
+  let toastT;
+  function toast(msg, ms) {
+    const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), ms || 2600);
+  }
+  function busy(msg) { $('#loadMsg').textContent = msg || 'Procesando…'; $('#loading').classList.remove('done'); }
+  function idle() { $('#loading').classList.add('done'); }
+  function modal(html) {
+    const root = $('#modalRoot');
+    root.innerHTML = '<div class="scrim"></div><div class="modal"><div class="grab"></div>' + html + '</div>';
+    hydrate(root); root.querySelector('.scrim').onclick = closeModal;
+    return root.querySelector('.modal');
+  }
+  function closeModal() { $('#modalRoot').innerHTML = ''; }
+  function confirmBox(title, text, okLabel, danger) {
+    return new Promise(res => {
+      const m = modal('<h3>' + esc(title) + '</h3><p class="lead">' + esc(text) + '</p><div class="btnrow"><button class="btn" data-r="0">Cancelar</button><button class="btn ' + (danger ? 'danger' : 'accent') + '" data-r="1">' + esc(okLabel || 'Aceptar') + '</button></div>');
+      m.querySelectorAll('[data-r]').forEach(b => b.onclick = () => { closeModal(); res(b.dataset.r === '1'); });
+      m.parentElement.querySelector('.scrim').onclick = () => { closeModal(); res(false); };
+    });
+  }
+
+  /* ---------- datos ---------- */
+  function prep(f) {
+    if (f.t === 'p') { f.mx = Merc.mxOf(f.c[0]); f.my = Merc.myOf(f.c[1]); return; }
+    let x0 = 9, y0 = 9, x1 = -9, y1 = -9;
+    f.R = f.c.map(ring => {
+      const a = new Float64Array(ring.length * 2);
+      for (let i = 0; i < ring.length; i++) {
+        const x = Merc.mxOf(ring[i][0]), y = Merc.myOf(ring[i][1]); a[i * 2] = x; a[i * 2 + 1] = y;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+      return a;
+    });
+    f.bb = [x0, y0, x1, y1];
+  }
+  const gkey = f => f.g.join('/');
+  function reindex() {
+    S.pts = []; S.areas = []; S.lines = []; S.nextId = 1;
+    S.areasByName = new Map(); S.areasByGroup = new Map(); S.linesByGroup = new Map();
+    S.groups = new Map(); S.munis = new Map();
+    S.feats.forEach(f => {
+      if (f.id >= S.nextId) S.nextId = f.id + 1;
+      if (f.t === 'p') S.pts.push(f);
+      else if (f.t === 'a') {
+        S.areas.push(f);
+        const n = norm(f.n); if (!S.areasByName.has(n)) S.areasByName.set(n, []); S.areasByName.get(n).push(f);
+        const k = gkey(f); if (!S.areasByGroup.has(k)) S.areasByGroup.set(k, []); S.areasByGroup.get(k).push(f);
+      } else {
+        S.lines.push(f);
+        const k = gkey(f); if (!S.linesByGroup.has(k)) S.linesByGroup.set(k, []); S.linesByGroup.get(k).push(f);
+      }
+    });
+    S.pts.forEach(p => {
+      const m = p.g[0] || 'Sin grupo';
+      if (!S.munis.has(m)) S.munis.set(m, new Set());
+      if (p.g[1]) S.munis.get(m).add(p.g[1]);
+      [m, p.g.slice(0, 2).join(' › ')].forEach((k, i) => {
+        if (i === 1 && p.g.length < 2) return;
+        let g = S.groups.get(k); if (!g) { g = { label: k, pts: [], lvl: i }; S.groups.set(k, g); }
+        g.pts.push(p);
+      });
+    });
+  }
+  const kindOf = f => f.st === 'new' ? 'nueva' : KML.kindOf(f);
+  const kindLabel = f => f.st === 'new' && f.src !== S.seedName ? 'Caja nueva' : (KML.kindOf(f) === 'caja' ? 'Caja' : 'Nodo / cabina');
+
+  async function loadData() {
+    let rows = await DB.all();
+    if (!rows.length) {
+      $('#loadMsg').textContent = 'Cargando cajas del KMZ…';
+      const r = await fetch('data/seed.json'); const j = await r.json();
+      S.seedName = j.name;
+      rows = j.f.map(f => { const o = Object.assign({}, f, { id: f.i, src: j.name }); delete o.i; return o; });
+      await DB.putMany(rows);
+    } else {
+      const sn = await DB.getMeta('seedName'); if (sn) S.seedName = sn;
+    }
+    DB.setMeta('seedName', S.seedName);
+    S.feats = rows; rows.forEach(prep); reindex();
+  }
+
+  function assocAreas(p) {
+    const byName = S.areasByName.get(norm(p.n)); if (byName && byName.length) return byName;
+    const cand = S.areasByGroup.get(gkey(p)) || [];
+    return cand.filter(a => a.R.some(r => pip(p.mx, p.my, r)));
+  }
+
+  /* ---------- mapa y dibujo ---------- */
+  const map = new GeoMap($('#map'));
+  const labelsSeen = new Set();
+  function tracePath(ctx, R, m, step) {
+    for (let k = 0; k < R.length; k++) {
+      const a = R[k], n = a.length / 2, st = step > 1 ? step : 1;
+      for (let i = 0; i < n; i += st) {
+        const x = (a[i * 2] - m.cx) * m.s + m.w / 2, y = (a[i * 2 + 1] - m.cy) * m.s + m.h / 2;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+    }
+  }
+  function draw(ctx, m) {
+    const b = m.bounds(), L = S.layers, z = m.z, s = m.s;
+    const inView = f => f.bb[2] >= b.x0 && f.bb[0] <= b.x1 && f.bb[3] >= b.y0 && f.bb[1] <= b.y1;
+    const sel = S.sel, selGroup = sel ? gkey(sel) : null;
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+    if (L.areas && z >= 12.5) {
+      ctx.beginPath();
+      for (const f of S.areas) {
+        if (!inView(f)) continue;
+        const w = (f.bb[2] - f.bb[0]) * s, h = (f.bb[3] - f.bb[1]) * s; if (w < 3 && h < 3) continue;
+        tracePath(ctx, f.R, m, f.R[0].length > 160 && w < 200 ? 3 : 1);
+      }
+      ctx.fillStyle = hexA(COL.accent, .10); ctx.fill(); ctx.strokeStyle = hexA(COL.accent, .55); ctx.lineWidth = 1.1; ctx.stroke();
+    }
+    if (L.rutas && z >= 12.5) {
+      ctx.beginPath();
+      for (const f of S.lines) { if (!inView(f)) continue; tracePath(ctx, f.R, m, 1); }
+      ctx.strokeStyle = hexA(COL.node, .7); ctx.lineWidth = 1.6; ctx.stroke();
+    }
+    if (sel) {
+      if (S.selAreas.length) {
+        ctx.beginPath(); S.selAreas.forEach(a => tracePath(ctx, a.R, m, 1));
+        ctx.fillStyle = hexA(COL.accent, .22); ctx.fill(); ctx.strokeStyle = COL.accent; ctx.lineWidth = 2.2; ctx.stroke();
+      }
+      const gl = (S.linesByGroup.get(selGroup) || []);
+      if (gl.length && L.rutas) { ctx.beginPath(); gl.forEach(l => tracePath(ctx, l.R, m, 1)); ctx.strokeStyle = COL.node; ctx.lineWidth = 2.6; ctx.stroke(); }
+    }
+
+    if (L.cajas) {
+      const r = z < 11 ? 2.2 : z < 13 ? 3.2 : z < 15 ? 4.6 : z < 17 ? 6.5 : 8;
+      const sets = { caja: [], nodo: [], nueva: [] }, edited = [];
+      for (const p of S.pts) {
+        if (p.mx < b.x0 || p.mx > b.x1 || p.my < b.y0 || p.my > b.y1) continue;
+        const x = (p.mx - m.cx) * s + m.w / 2, y = (p.my - m.cy) * s + m.h / 2;
+        sets[kindOf(p)].push(p, x, y); if (p.st === 'edit') edited.push(x, y);
+      }
+      for (const k of ['caja', 'nodo', 'nueva']) {
+        const a = sets[k]; if (!a.length) continue;
+        ctx.beginPath();
+        for (let i = 0; i < a.length; i += 3) { ctx.moveTo(a[i + 1] + r, a[i + 2]); ctx.arc(a[i + 1], a[i + 2], r, 0, 6.2832); }
+        ctx.fillStyle = k === 'caja' ? COL.accent : k === 'nodo' ? COL.node : COL.nueva; ctx.fill();
+        if (z >= 13) { ctx.lineWidth = z >= 15 ? 2 : 1.2; ctx.strokeStyle = S.base === 'light' || S.theme === 'light' ? 'rgba(255,255,255,.95)' : 'rgba(8,14,26,.85)'; ctx.stroke(); }
+      }
+      if (edited.length) {
+        ctx.beginPath(); for (let i = 0; i < edited.length; i += 2) { ctx.moveTo(edited[i] + r + 3, edited[i + 1]); ctx.arc(edited[i], edited[i + 1], r + 3, 0, 6.2832); }
+        ctx.strokeStyle = COL.nueva; ctx.lineWidth = 2; ctx.stroke();
+      }
+      if (L.etiquetas && z >= 17) {
+        labelsSeen.clear(); ctx.font = '600 12px ui-rounded,system-ui,sans-serif'; ctx.textBaseline = 'middle'; ctx.lineWidth = 3.5; ctx.lineJoin = 'round';
+        const halo = S.base === 'light' || S.theme === 'light' ? 'rgba(255,255,255,.92)' : 'rgba(8,14,26,.9)';
+        ctx.fillStyle = COL.text; let n = 0;
+        for (const k of ['caja', 'nodo', 'nueva']) {
+          const a = sets[k];
+          for (let i = 0; i < a.length && n < 160; i += 3) {
+            const cell = ((a[i + 1] / 130) | 0) + ':' + ((a[i + 2] / 20) | 0); if (labelsSeen.has(cell)) continue; labelsSeen.add(cell);
+            ctx.strokeStyle = halo; ctx.strokeText(a[i].n, a[i + 1] + r + 5, a[i + 2]); ctx.fillText(a[i].n, a[i + 1] + r + 5, a[i + 2]); n++;
+          }
+        }
+      }
+    }
+
+    // selección + línea hacia mí
+    if (sel) {
+      const [x, y] = m.toScreenN(sel.mx, sel.my);
+      if (S.pos && S.showLine) {
+        const [ux, uy] = m.toScreen(S.pos.lat, S.pos.lon);
+        ctx.setLineDash([7, 7]); ctx.strokeStyle = COL.user; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(ux, uy); ctx.lineTo(x, y); ctx.stroke(); ctx.setLineDash([]);
+        const d = hav(S.pos.lat, S.pos.lon, sel.c[1], sel.c[0]);
+        pill(ctx, fmtD(d), (ux + x) / 2, (uy + y) / 2 - 12, COL.user);
+      }
+      ctx.beginPath(); ctx.arc(x, y, 17, 0, 6.2832); ctx.fillStyle = hexA(COL.accent, .18); ctx.fill();
+      ctx.strokeStyle = COL.accent; ctx.lineWidth = 3; ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, 6.2832); ctx.fillStyle = '#fff'; ctx.fill();
+    }
+
+    // medición
+    if (S.meas.pts.length) {
+      const pts = S.meas.pts.map(p => m.toScreen(p[1], p[0]));
+      ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+      ctx.strokeStyle = '#ff4d9d'; ctx.lineWidth = 4; ctx.stroke();
+      pts.forEach((p, i) => {
+        ctx.beginPath(); ctx.arc(p[0], p[1], 6, 0, 6.2832); ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#ff4d9d'; ctx.lineWidth = 3; ctx.stroke();
+        if (i) pill(ctx, fmtD(hav(S.meas.pts[i - 1][1], S.meas.pts[i - 1][0], S.meas.pts[i][1], S.meas.pts[i][0])), (p[0] + pts[i - 1][0]) / 2, (p[1] + pts[i - 1][1]) / 2 - 12, '#ff4d9d');
+      });
+    }
+
+    // mi ubicación
+    if (S.pos) {
+      const [x, y] = m.toScreen(S.pos.lat, S.pos.lon), rr = S.pos.acc / m.metersPerPx(S.pos.lat);
+      if (rr > 14) { ctx.beginPath(); ctx.arc(x, y, rr, 0, 6.2832); ctx.fillStyle = hexA(COL.user, .12); ctx.fill(); ctx.strokeStyle = hexA(COL.user, .4); ctx.lineWidth = 1; ctx.stroke(); }
+      if (S.pos.heading != null && isFinite(S.pos.heading) && S.pos.speed > 0.6) {
+        ctx.save(); ctx.translate(x, y); ctx.rotate(S.pos.heading * D2R);
+        ctx.beginPath(); ctx.moveTo(0, -26); ctx.lineTo(-11, -9); ctx.lineTo(11, -9); ctx.closePath(); ctx.fillStyle = COL.user; ctx.fill(); ctx.restore();
+      }
+      ctx.beginPath(); ctx.arc(x, y, 11, 0, 6.2832); ctx.fillStyle = 'rgba(255,255,255,.95)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, 7.5, 0, 6.2832); ctx.fillStyle = COL.user; ctx.fill();
+    }
+  }
+  function pill(ctx, text, x, y, color) {
+    ctx.font = '700 12.5px ui-rounded,system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const w = ctx.measureText(text).width + 14;
+    ctx.fillStyle = color; roundRect(ctx, x - w / 2, y - 11, w, 22, 11); ctx.fill();
+    ctx.fillStyle = '#04141f'; if (color === '#ff4d9d') ctx.fillStyle = '#fff'; ctx.fillText(text, x, y + .5); ctx.textAlign = 'start';
+  }
+  function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+  function hexA(hex, a) {
+    hex = hex.trim();
+    if (hex[0] !== '#') return hex;
+    if (hex.length === 4) hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+    return 'rgba(' + parseInt(hex.slice(1, 3), 16) + ',' + parseInt(hex.slice(3, 5), 16) + ',' + parseInt(hex.slice(5, 7), 16) + ',' + a + ')';
+  }
+  map.onDraw = draw;
+  // Si hay "señal" pero no llegan mosaicos, tratamos la red como caída y probamos cada 25 s
+  let probeT = 0;
+  map.onNetBad = () => {
+    if (S.netBad || !navigator.onLine) return; S.netBad = true; netState(); applyBase();
+    clearInterval(probeT);
+    probeT = setInterval(() => {
+      const im = new Image(); const done = ok => { if (ok && S.netBad) { S.netBad = false; clearInterval(probeT); netState(); applyBase(); } };
+      im.onload = () => done(true); im.onerror = () => done(false); im.src = 'https://tile.openstreetmap.org/0/0/0.png?_=' + Date.now();
+    }, 25000);
+  };
+
+
+  /* ---------- toques en el mapa ---------- */
+  function hitPoint(px, py) {
+    if (!S.layers.cajas) return null;
+    const m = map, lim = Math.max(20, (m.z < 13 ? 3 : 7) + 14); let best = null, bd = lim * lim;
+    const b = m.bounds();
+    for (const p of S.pts) {
+      if (p.mx < b.x0 || p.mx > b.x1 || p.my < b.y0 || p.my > b.y1) continue;
+      const x = (p.mx - m.cx) * m.s + m.w / 2 - px, y = (p.my - m.cy) * m.s + m.h / 2 - py, d = x * x + y * y;
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  }
+  map.onTap = (px, py) => {
+    hideResults();
+    if (S.pick) return;
+    if (S.meas.on) {
+      const h = hitPoint(px, py), ll = h ? { lat: h.c[1], lon: h.c[0] } : map.fromScreen(px, py);
+      S.meas.pts.push([ll.lon, ll.lat]); updateMeasure(); return;
+    }
+    const h = hitPoint(px, py);
+    if (h) select(h, true, true); else if (S.sel) deselect();
+  };
+  map.onUserMove = () => { S.userMoved = true; if (S.follow) { S.follow = false; $('#btnLocate').classList.remove('on'); } };
+  map.onMoveEnd = () => { if (!S.pos) updateNearby(); };
+  map.onMove = () => { if (S.pick) $('#pickCoords').textContent = coordTxt(map.center().lat, map.center().lon); };
+  const coordTxt = (la, lo) => la.toFixed(6) + ', ' + lo.toFixed(6);
+
+  /* ---------- GPS ---------- */
+  let lastNb = { lat: 0, lon: 0, t: 0 };
+  function startGps() {
+    if (!navigator.geolocation) { toast('Este dispositivo no tiene GPS'); return; }
+    const pg = $('#pillGps'); pg.hidden = false; pg.className = 'pill'; pg.textContent = 'Buscando GPS…';
+    // 1) posición rápida (red / última conocida)  2) GPS preciso en seguida
+    navigator.geolocation.getCurrentPosition(p => { if (!S.pos) onPos(p); }, () => { }, { enableHighAccuracy: false, maximumAge: 600000, timeout: 10000 });
+    navigator.geolocation.watchPosition(onPos, onGpsErr, { enableHighAccuracy: true, maximumAge: 1000, timeout: 60000 });
+  }
+  function onPos(p) {
+    const c = p.coords;
+    S.pos = { lat: c.latitude, lon: c.longitude, acc: c.accuracy, heading: c.heading, speed: c.speed };
+    const pg = $('#pillGps'); pg.hidden = false; pg.className = 'pill ' + (c.accuracy <= 25 ? 'ok' : 'warn'); pg.textContent = 'GPS ±' + Math.round(c.accuracy) + ' m';
+    if (!S.centered) autoTheme();
+    if (!S.centered) { S.centered = true; if (!S.userMoved && !S.sel) map.flyTo(S.pos.lat, S.pos.lon, 16.5, 0.4); }
+    else if (S.follow && !S.sel && !S.pick) map.flyTo(S.pos.lat, S.pos.lon, Math.max(map.z, 16), 0.4, 400);
+    const now = Date.now();
+    if (hav(lastNb.lat, lastNb.lon, S.pos.lat, S.pos.lon) > 8 || now - lastNb.t > 6000) { lastNb = { lat: S.pos.lat, lon: S.pos.lon, t: now }; updateNearby(); }
+    if (S.sel) renderDetail(true);
+    map.invalidate();
+  }
+  function onGpsErr(e) {
+    const pg = $('#pillGps'); pg.hidden = false; pg.className = 'pill warn';
+    pg.textContent = e.code === 1 ? 'GPS sin permiso' : 'Sin señal GPS';
+    if (e.code === 1) toast('Activa el permiso de ubicación del navegador para ver tu posición', 4000);
+  }
+  $('#btnLocate').onclick = () => {
+    if (!S.pos) { toast('Buscando tu ubicación…'); startGpsOnce(); return; }
+    S.follow = true; $('#btnLocate').classList.add('on'); S.userMoved = false;
+    map.flyTo(S.pos.lat, S.pos.lon, Math.max(map.z, 16.5), S.sel ? 0.3 : 0.4);
+  };
+  function startGpsOnce() { if (!S.gpsStarted) { S.gpsStarted = true; startGps(); } }
+
+  /* ---------- cercanas ---------- */
+  const RADII = [[300, '300 m'], [1000, '1 km'], [3000, '3 km'], [10000, '10 km']];
+  function refPoint() { if (S.pos) return { lat: S.pos.lat, lon: S.pos.lon, gps: true }; const c = map.center(); return { lat: c.lat, lon: c.lon, gps: false }; }
+  function nearest(ref, max, filter) {
+    const out = [];
+    for (const p of S.pts) {
+      if (filter && !filter(p)) continue;
+      const dl = Math.abs(p.c[1] - ref.lat); if (dl > 3) continue;
+      out.push([hav(ref.lat, ref.lon, p.c[1], p.c[0]), p]);
+    }
+    out.sort((a, b) => a[0] - b[0]); return out.slice(0, max);
+  }
+  function subOf(f) { return f.g.length > 1 ? f.g[0] + ' · ' + f.g[f.g.length - 1] : (f.g[0] || ''); }
+  function cardHtml(f, d) {
+    return '<button class="card" data-id="' + f.id + '"><div class="row top"><span class="dot ' + kindOf(f) + '"></span><div class="meta"><div class="nm">' + esc(f.n) + '</div><div class="sb">' + esc(subOf(f)) + '</div></div></div><div class="dd">' + fmtD(d).replace(/ (m|km)$/, ' <small>$1</small>') + '</div></button>';
+  }
+  function updateNearby() {
+    if (!S.pts.length) return;
+    const ref = refPoint(), all = nearest(ref, 60), inR = all.filter(a => a[0] <= S.radius);
+    const rl = (RADII.find(r => r[0] === S.radius) || [0, ''])[1];
+    $('#nbChips').innerHTML = RADII.map(r => '<button class="chip' + (r[0] === S.radius ? ' on' : '') + '" data-r="' + r[0] + '">' + r[1] + '</button>').join('');
+    const list = $('#nbList');
+    $('#nbSub').textContent = (inR.length ? inR.length + (inR.length >= 60 ? '+' : '') + ' en ' + rl : 'Ninguna en ' + rl) + (ref.gps ? ' · desde tu ubicación' : ' · desde el centro del mapa');
+    if (inR.length) list.innerHTML = inR.slice(0, 40).map(a => cardHtml(a[1], a[0])).join('');
+    else list.innerHTML = all.slice(0, 3).map(a => cardHtml(a[1], a[0])).join('') || '<div class="empty">No hay cajas cargadas.</div>';
+  }
+  $('#nbChips').onclick = e => { const b = e.target.closest('[data-r]'); if (b) { S.radius = +b.dataset.r; saveSettings(); updateNearby(); } };
+  $('#nbList').onclick = e => { const b = e.target.closest('[data-id]'); if (b) { const f = S.feats.find(x => x.id === +b.dataset.id); if (f) select(f, true); } };
+  function dragSheet(grab, onUp, onDown) {
+    let y0 = null;
+    grab.addEventListener('pointerdown', e => { y0 = e.clientY; });
+    grab.addEventListener('pointerup', e => {
+      if (y0 == null) return; const dy = e.clientY - y0; y0 = null;
+      if (dy < -25) onUp(); else if (dy > 25) onDown(); else (dy >= -25 && dy <= 25) && (grab._tap ? grab._tap() : 0);
+    });
+  }
+  const nb = $('#nearby');
+  $('#nbGrab')._tap = () => { nb.dataset.state = nb.dataset.state === 'full' ? 'peek' : 'full'; };
+  dragSheet($('#nbGrab'), () => nb.dataset.state = 'full', () => nb.dataset.state = 'peek');
+  nb.querySelector('.sheet-h').addEventListener('click', e => { if (!e.target.closest('.chip')) nb.dataset.state = nb.dataset.state === 'full' ? 'peek' : 'full'; });
+
+  /* ---------- búsqueda ---------- */
+  const q = $('#q');
+  function hideResults() { $('#results').hidden = true; }
+  q.addEventListener('input', () => {
+    $('#qClear').hidden = !q.value;
+    const t = norm(q.value); const box = $('#results');
+    if (t.length < 2) { box.hidden = true; return; }
+    const ref = refPoint(); let res = [];
+    const grp = [];
+    S.groups.forEach(g => { if (norm(g.label).includes(t)) grp.push(g); });
+    grp.sort((a, b) => a.lvl - b.lvl).slice(0, 3).forEach(g => res.push({ g }));
+    const hits = [];
+    for (const p of S.pts) { const n = norm(p.n); const i = n.indexOf(t); if (i >= 0) hits.push([i, hav(ref.lat, ref.lon, p.c[1], p.c[0]), p]); }
+    hits.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    hits.slice(0, 30).forEach(h => res.push({ f: h[2], d: h[1] }));
+    box.hidden = false;
+    box.innerHTML = res.length ? res.map((r, i) => r.g
+      ? '<button class="res" data-g="' + esc(r.g.label) + '"><span class="dot nodo"></span><div><b>' + esc(r.g.label) + '</b><small>' + r.g.pts.length + ' cajas · ver zona</small></div></button>'
+      : '<button class="res" data-id="' + r.f.id + '"><span class="dot ' + kindOf(r.f) + '"></span><div><b>' + esc(r.f.n) + '</b><small>' + esc(subOf(r.f)) + '</small></div><span class="dist">' + fmtD(r.d) + '</span></button>').join('')
+      : '<div class="empty">Sin resultados para “' + esc(q.value) + '”</div>';
+  });
+  q.addEventListener('keydown', e => { if (e.key === 'Enter') { const b = $('#results .res'); if (b) b.click(); } if (e.key === 'Escape') { q.value = ''; q.dispatchEvent(new Event('input')); q.blur(); } });
+  $('#qClear').onclick = () => { q.value = ''; q.dispatchEvent(new Event('input')); };
+  $('#results').onclick = e => {
+    const b = e.target.closest('.res'); if (!b) return;
+    q.blur(); hideResults();
+    if (b.dataset.g) {
+      const g = S.groups.get(b.dataset.g); if (!g) return;
+      let a = 90, c = -90, d = 180, f = -180; g.pts.forEach(p => { a = Math.min(a, p.c[1]); c = Math.max(c, p.c[1]); d = Math.min(d, p.c[0]); f = Math.max(f, p.c[0]); });
+      deselect(); S.userMoved = true; map.fitBounds(a, d, c, f, 50);
+    } else { const f = S.feats.find(x => x.id === +b.dataset.id); if (f) select(f, true); }
+  };
+
+  /* ---------- hojas ---------- */
+  function setSheetH() {
+    let el = null;
+    if (S.pick) el = $('#pickBar'); else if (S.meas.on) el = $('#measureBar'); else el = S.sel ? $('#detail') : $('#nearby');
+    const h = el && !el.hidden ? el.offsetHeight + (el.id === 'detail' || el.id === 'nearby' ? 0 : 14) : 0;
+    document.documentElement.style.setProperty('--sheet-h', Math.max(h, 0) + 'px');
+  }
+  function layout() {
+    const meas = S.meas.on, pick = !!S.pick;
+    $('#nearby').hidden = !!S.sel || meas || pick;
+    $('#detail').hidden = !S.sel || meas || pick;
+    $('#measureBar').hidden = !meas; $('#pickLayer').hidden = !pick;
+    $('#fabs').hidden = pick || !!S.sel; $('#top').hidden = pick; $('#pills').hidden = pick;
+    $('#btnMeasure').classList.toggle('on', meas);
+    setSheetH();
+  }
+  const ro = new ResizeObserver(setSheetH); ['#nearby', '#detail', '#measureBar', '#pickBar'].forEach(s => ro.observe($(s)));
+
+  /* ---------- detalle ---------- */
+  function select(f, fly, fromTap) {
+    S.sel = f; S.selAreas = assocAreas(f); S.userMoved = true; S.follow = false; $('#btnLocate').classList.remove('on');
+    layout(); renderDetail(); $('#detail .d-scroll').scrollTop = 0;
+    if (fly) map.flyTo(f.c[1], f.c[0], Math.max(map.z, fromTap ? 16.5 : 17.5), 0.27);
+    map.invalidate();
+  }
+  function deselect() { S.sel = null; S.selAreas = []; layout(); map.invalidate(); }
+  $('#dClose').onclick = deselect;
+  $('#dGrab').onclick = deselect;
+  dragSheet($('#dGrab'), () => { }, deselect);
+
+  function renderDetail(soft) {
+    const f = S.sel; if (!f) return;
+    const k = kindOf(f), d = S.pos ? hav(S.pos.lat, S.pos.lon, f.c[1], f.c[0]) : null;
+    if (soft) { const sd = $('#dStats .dist'); if (sd) sd.textContent = fmtD(d); return; }
+    $('#dIco').className = 'd-ico ' + k; $('#dIco').innerHTML = ic('box'); hydrate($('#dIco'));
+    $('#dName').textContent = f.n; $('#dSub').textContent = subOf(f);
+    const estado = f.st === 'new' ? 'Nueva' : f.st === 'edit' ? 'Editada' : 'Original';
+    $('#dStats').innerHTML = '<div class="stat"><small>Distancia</small><b class="dist">' + (d == null ? '—' : fmtD(d)) + '</b></div><div class="stat"><small>Tipo</small><b>' + esc(kindLabel(f)) + '</b></div><div class="stat"><small>Estado</small><b>' + estado + '</b></div>';
+    const rows = [['Municipio', f.g[0] || '—'], ['Cabina / carpeta', f.g.slice(1).join(' › ') || '—'], ['Latitud, longitud', f.c[1].toFixed(6) + ', ' + f.c[0].toFixed(6)]];
+    Object.keys(f.x || {}).forEach(key => { if (norm(f.x[key]) !== norm(f.n)) rows.push([key, f.x[key]]); });
+    if (f.d) rows.push(['Notas', f.d]);
+    if (f.src) rows.push(['Origen', f.src]);
+    $('#dInfo').innerHTML = rows.map(r => '<div><dt>' + esc(r[0]) + '</dt><dd style="white-space:pre-line">' + esc(r[1]) + '</dd></div>').join('');
+  }
+  const wazeUrl = f => 'https://waze.com/ul?ll=' + f.c[1] + ',' + f.c[0] + '&navigate=yes&zoom=17';
+  $('#aWaze').onclick = () => { const f = S.sel; if (f) openExt('waze://?ll=' + f.c[1] + ',' + f.c[0] + '&navigate=yes', wazeUrl(f)); };
+  $('#aGmaps').onclick = () => { const f = S.sel; if (f) openExt('google.navigation:q=' + f.c[1] + ',' + f.c[0], 'https://www.google.com/maps/dir/?api=1&destination=' + f.c[1] + ',' + f.c[0] + '&travelmode=driving'); };
+  const shareText = f => f.n + '\n' + f.c[1].toFixed(6) + ',' + f.c[0].toFixed(6) + '\nhttps://maps.google.com/?q=' + f.c[1] + ',' + f.c[0];
+  async function copyText(t) {
+    try { await navigator.clipboard.writeText(t); return true; } catch (e) {
+      const ta = document.createElement('textarea'); ta.value = t; ta.style.cssText = 'position:fixed;opacity:0'; document.body.appendChild(ta); ta.select();
+      let ok = false; try { ok = document.execCommand('copy'); } catch (_) { } ta.remove(); return ok;
+    }
+  }
+  $('#aCopy').onclick = async () => { if (S.sel) toast((await copyText(shareText(S.sel))) ? 'Coordenadas copiadas' : 'No se pudo copiar'); };
+  $('#aShare').onclick = async () => {
+    const f = S.sel; if (!f) return;
+    if (NB) NB.shareText(shareText(f));
+    else if (navigator.share) { try { await navigator.share({ title: f.n, text: shareText(f) }); } catch (e) { } }
+    else toast((await copyText(shareText(f))) ? 'Copiado para pegar en un mensaje' : 'No se pudo compartir');
+  };
+  $('#aEdit').onclick = () => S.sel && openForm(S.sel);
+
+  /* ---------- metraje ---------- */
+  $('#aMetraje').onclick = () => S.sel && openMetraje(S.sel);
+  function openMetraje(f) {
+    const rows = []; let big = '—', bigSub = 'Activa el GPS para medir desde tu ubicación';
+    if (S.pos) {
+      const d = hav(S.pos.lat, S.pos.lon, f.c[1], f.c[0]), b = bearing(S.pos.lat, S.pos.lon, f.c[1], f.c[0]);
+      big = fmtD(d); bigSub = 'en línea recta desde tu ubicación · rumbo ' + cardinal(b) + ' (' + Math.round(b) + '°)';
+      if (S.pos.acc > 30) bigSub += ' · precisión GPS ±' + Math.round(S.pos.acc) + ' m';
+    }
+    const gk = gkey(f);
+    const sameG = S.pts.filter(p => p !== f && gkey(p) === gk);
+    if (sameG.length) {
+      let bp = null, bd = 1e12; sameG.forEach(p => { const d = hav(f.c[1], f.c[0], p.c[1], p.c[0]); if (d < bd) { bd = d; bp = p; } });
+      rows.push(['Caja más cercana en esta cabina', esc(bp.n) + ' · ' + fmtD(bd)]);
+    }
+    const lines = S.linesByGroup.get(gk) || [];
+    if (lines.length) {
+      let tot = 0, seg = 0; lines.forEach(l => l.c.forEach(c => { tot += lengthM(c); seg++; }));
+      rows.push(['Fibra trazada en esta cabina', fmtD(tot) + ' · ' + seg + ' tramos']);
+    }
+    S.selAreas.forEach((a, i) => {
+      if (i > 1) return;
+      rows.push(['Área de cobertura' + (a.n ? ' (' + esc(a.n) + ')' : ''), fmtA(a.c.reduce((s, r) => s + ringArea(r), 0)) + ' · perímetro ' + fmtD(a.c.reduce((s, r) => s + lengthM(r), 0))]);
+    });
+    rows.push(['Coordenadas', f.c[1].toFixed(6) + ', ' + f.c[0].toFixed(6)]);
+    const m = modal('<h3>Metraje · ' + esc(f.n) + '</h3><div class="big">' + big + '</div><p class="lead">' + esc(bigSub) + '</p>' +
+      rows.map(r => '<div class="mrow"><span>' + r[0] + '</span><b>' + r[1] + '</b></div>').join('') +
+      '<p class="lead" style="margin-top:12px">Las distancias son en línea recta. Para el recorrido por carretera usa “Ir con Waze”. Para el metraje real del cable, traza el recorrido sobre el mapa.</p>' +
+      '<div class="btnrow"><button class="btn" id="mmLine">' + ic('nav') + (S.showLine ? 'Ocultar línea' : 'Mostrar línea') + '</button><button class="btn accent" id="mmTrace">' + ic('ruler') + 'Trazar recorrido</button></div>');
+    hydrate(m);
+    m.querySelector('#mmLine').onclick = () => { S.showLine = !S.showLine; closeModal(); map.invalidate(); };
+    m.querySelector('#mmTrace').onclick = () => { closeModal(); startMeasure(f); };
+  }
+  function startMeasure(f) {
+    S.meas = { on: true, pts: f ? [[f.c[0], f.c[1]]] : [] };
+    if (f && S.sel) { S.sel = null; S.selAreas = []; }
+    hideResults(); layout(); updateMeasure();
+    if (f) map.flyTo(f.c[1], f.c[0], Math.max(map.z, 17), 0.35);
+    toast(f ? 'Toca el mapa para marcar el recorrido desde la caja' : 'Toca el mapa para ir sumando metros', 3200);
+  }
+  function updateMeasure() {
+    let t = 0; for (let i = 1; i < S.meas.pts.length; i++) t += hav(S.meas.pts[i - 1][1], S.meas.pts[i - 1][0], S.meas.pts[i][1], S.meas.pts[i][0]);
+    $('#mTotal').textContent = fmtD(t) === '—' ? '0 m' : fmtD(t); map.invalidate();
+  }
+  function stopMeasure() { S.meas = { on: false, pts: [] }; layout(); map.invalidate(); }
+  $('#btnMeasure').onclick = () => S.meas.on ? stopMeasure() : startMeasure(null);
+  $('#mUndo').onclick = () => { S.meas.pts.pop(); updateMeasure(); };
+  $('#mClear').onclick = () => { S.meas.pts = []; updateMeasure(); };
+  $('#mDone').onclick = stopMeasure;
+
+  /* ---------- agregar / editar ---------- */
+  const fc = v => v === '' || v == null ? '' : (isFinite(+v) ? (+v).toFixed(6) : v);
+  function parseNums(str) { return (String(str).match(/-?\d+(?:[.,]\d+)?/g) || []).map(n => parseFloat(n.replace(',', '.'))); }
+  function openForm(f, draft) {
+    const edit = !!f; let d = draft;
+    if (!d) {
+      d = { n: f ? f.n : '', muni: f ? f.g[0] || '' : '', cab: f ? f.g.slice(1).join(' › ') : '', lat: f ? f.c[1] : '', lon: f ? f.c[0] : '', d: f ? f.d || '' : '' };
+      if (!f) {
+        const ref = refPoint(), nn = nearest(ref, 1)[0];
+        if (nn && nn[0] < 5000) { d.muni = nn[1].g[0] || ''; d.cab = nn[1].g.slice(1).join(' › '); }
+      }
+    }
+    const munis = Array.from(S.munis.keys()).sort();
+    const m = modal('<h3>' + (edit ? 'Editar caja' : 'Agregar caja') + '</h3><p class="lead">' + (edit ? 'Cambia los datos o la ubicación. Se marcará como “editada” al exportar.' : 'Escribe las coordenadas, usa tu GPS o fija el punto sobre el mapa.') + '</p>' +
+      '<label class="field"><span>NOMBRE DE LA CAJA *</span><input id="fN" value="' + esc(d.n) + '" placeholder="Ej. NI101/102-YALGC0101" autocapitalize="characters" autocomplete="off"></label>' +
+      '<div class="two"><label class="field"><span>MUNICIPIO</span><input id="fM" list="dlM" value="' + esc(d.muni) + '" autocomplete="off"><datalist id="dlM">' + munis.map(x => '<option value="' + esc(x) + '">').join('') + '</datalist></label>' +
+      '<label class="field"><span>CABINA / CARPETA</span><input id="fC" list="dlC" value="' + esc(d.cab) + '" autocomplete="off"><datalist id="dlC"></datalist></label></div>' +
+      '<div class="two"><label class="field"><span>LATITUD</span><input id="fLa" value="' + esc(fc(d.lat)) + '" placeholder="13.4542" autocomplete="off"></label>' +
+      '<label class="field"><span>LONGITUD</span><input id="fLo" value="' + esc(fc(d.lon)) + '" placeholder="-86.4069" autocomplete="off"></label></div>' +
+      '<div class="btnrow" style="margin:-2px 0 14px"><button class="btn small" id="fGps">' + ic('locate') + 'Mi GPS</button><button class="btn small" id="fPick">' + ic('pin') + 'Fijar en el mapa</button></div>' +
+      '<label class="field"><span>NOTAS (OPCIONAL)</span><textarea id="fD" placeholder="Referencia, FAT, estado…">' + esc(d.d) + '</textarea></label>' +
+      '<div class="btnrow">' + (edit ? '<button class="btn danger" id="fDel" style="flex:.45">' + ic('trash') + '</button>' : '') + '<button class="btn" id="fCancel">Cancelar</button><button class="btn accent" id="fSave">' + ic('check') + 'Guardar</button></div>');
+    hydrate(m);
+    const $$ = s => m.querySelector(s);
+    const fillCab = () => { const set = S.munis.get($$('#fM').value.trim()); $$('#dlC').innerHTML = set ? Array.from(set).sort().map(x => '<option value="' + esc(x) + '">').join('') : ''; };
+    fillCab(); $$('#fM').addEventListener('input', fillCab);
+    const splitPaste = () => {
+      const a = $$('#fLa'), o = $$('#fLo'); const nums = parseNums(a.value);
+      if (nums.length >= 2) { a.value = nums[0]; o.value = nums[1]; }
+    };
+    $$('#fLa').addEventListener('input', splitPaste);
+    const grab = () => ({ n: $$('#fN').value.trim(), muni: $$('#fM').value.trim(), cab: $$('#fC').value.trim(), lat: $$('#fLa').value.trim(), lon: $$('#fLo').value.trim(), d: $$('#fD').value.trim() });
+    $$('#fGps').onclick = () => {
+      if (!S.pos) { startGpsOnce(); toast('Esperando señal GPS… intenta de nuevo en unos segundos'); return; }
+      $$('#fLa').value = S.pos.lat.toFixed(6); $$('#fLo').value = S.pos.lon.toFixed(6); toast('Ubicación actual (±' + Math.round(S.pos.acc) + ' m)');
+    };
+    $$('#fCancel').onclick = closeModal;
+    $$('#fPick').onclick = () => { const dd = grab(); closeModal(); startPick(dd, f); };
+    if ($$('#fDel')) $$('#fDel').onclick = async () => {
+      if (await confirmBox('¿Eliminar ' + f.n + '?', 'Se quitará de la app. Si ya la exportaste, el archivo anterior no cambia.', 'Eliminar', true)) {
+        S.feats = S.feats.filter(x => x !== f); await DB.del(f.id); reindex(); deselect(); updateNearby(); map.invalidate(); toast('Caja eliminada');
+      }
+    };
+    $$('#fSave').onclick = async () => {
+      const v = grab(); let lat = parseFloat(v.lat.replace(',', '.')), lon = parseFloat(v.lon.replace(',', '.'));
+      if (!v.n) { toast('Escribe el nombre de la caja'); $$('#fN').focus(); return; }
+      if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { toast('Revisa las coordenadas'); return; }
+      const nn = nearest({ lat, lon }, 1)[0];
+      if (nn && nn[0] > 150000 && !(await confirmBox('Ubicación lejana', 'Este punto queda a ' + fmtD(nn[0]) + ' de la caja más cercana. ¿Las coordenadas son correctas (¿falta el signo − en la longitud?)', 'Guardar igual'))) return;
+      const g = [v.muni || 'Sin municipio'].concat(v.cab ? v.cab.split(/\s*›\s*/).filter(Boolean) : []);
+      let tgt = f;
+      if (edit) {
+        const moved = hav(f.c[1], f.c[0], lat, lon) > 0.5;
+        if (f.n !== v.n || moved || gkey(f) !== g.join('/') || (f.d || '') !== v.d) { if (f.st !== 'new') f.st = 'edit'; }
+        f.n = v.n; f.c = [Math.round(lon * 1e6) / 1e6, Math.round(lat * 1e6) / 1e6]; f.g = g; f.d = v.d || undefined; f.ts = Date.now();
+      } else {
+        tgt = { id: S.nextId++, t: 'p', n: v.n, g, c: [Math.round(lon * 1e6) / 1e6, Math.round(lat * 1e6) / 1e6], d: v.d || undefined, st: 'new', ts: Date.now(), src: 'Agregada en la app' };
+        S.feats.push(tgt);
+      }
+      prep(tgt); await DB.put(tgt); reindex(); closeModal(); select(tgt, true); updateNearby();
+      toast(edit ? 'Cambios guardados' : 'Caja agregada');
+    };
+  }
+  function startPick(draft, f) {
+    S.pick = { draft, f }; layout();
+    if (draft.lat !== '' && isFinite(parseFloat(draft.lat)) && isFinite(parseFloat(draft.lon))) map.flyTo(parseFloat(draft.lat), parseFloat(draft.lon), Math.max(map.z, 18), 0.5, 500);
+    else if (S.pos) map.flyTo(S.pos.lat, S.pos.lon, Math.max(map.z, 18), 0.5, 500);
+    $('#pickCoords').textContent = coordTxt(map.center().lat, map.center().lon);
+  }
+  $('#pickCancel').onclick = () => { const p = S.pick; S.pick = null; layout(); openForm(p.f, p.draft); };
+  $('#pickOk').onclick = () => {
+    const p = S.pick, c = map.center(); S.pick = null; p.draft.lat = c.lat.toFixed(6); p.draft.lon = c.lon.toFixed(6); layout(); openForm(p.f, p.draft);
+  };
+  $('#btnAdd').onclick = () => { if (S.sel) deselect(); openForm(null); };
+
+  /* ---------- capas ---------- */
+  $('#btnLayers').onclick = () => {
+    const m = modal('<h3>Mapa y capas</h3><p class="lead">Elige el fondo y qué mostrar sobre el mapa.</p><div id="lyB"></div><div class="sep"></div><div id="lyL"></div><div class="legend"><span><i class="dot"></i>Caja</span><span><i class="dot nodo"></i>Nodo / cabina</span><span><i class="dot nueva"></i>Nueva</span></div>');
+    const render = () => {
+      const keys = ['auto', 'dark', 'light', 'sat', 'gmap', 'gsat', 'none'];
+      const lab = k => k === 'auto' ? 'Automático · día y noche' : BASES[k].label;
+      const sub = k => k === 'auto' ? '<small>Claro de día y oscuro de noche, según el sol</small>' : k === 'none' ? '<small>No descarga nada · ideal sin señal</small>' : '';
+      const on = k => k === 'auto' ? (S.themeMode === 'auto' && (S.base === 'dark' || S.base === 'light')) : (k === 'dark' || k === 'light') ? (S.themeMode !== 'auto' && S.base === k) : S.base === k;
+      m.querySelector('#lyB').innerHTML = keys.map(k => '<button class="opt' + (on(k) ? ' on' : '') + '" data-b="' + k + '"><span class="rad"></span><div><b>' + lab(k) + '</b>' + sub(k) + '</div></button>').join('');
+      const L = [['cajas', 'Cajas y nodos'], ['areas', 'Áreas de cobertura'], ['rutas', 'Rutas de fibra'], ['etiquetas', 'Nombres de las cajas']];
+      m.querySelector('#lyL').innerHTML = L.map(l => '<button class="opt' + (S.layers[l[0]] ? ' on' : '') + '" data-l="' + l[0] + '"><b>' + l[1] + '</b><span class="sw"></span></button>').join('');
+    };
+    render();
+    m.onclick = e => {
+      const b = e.target.closest('[data-b]'), l = e.target.closest('[data-l]');
+      if (b) {
+        const k = b.dataset.b;
+        if (k === 'auto') { S.themeMode = 'auto'; if (S.base !== 'dark' && S.base !== 'light') S.base = 'dark'; autoTheme(); }
+        else if (k === 'dark' || k === 'light') { S.themeMode = k; S.base = k; S.theme = k; applyBase(); }
+        else { S.base = k; applyBase(); }
+        saveSettings(); render();
+      }
+      if (l) { S.layers[l.dataset.l] = !S.layers[l.dataset.l]; saveSettings(); map.invalidate(); render(); }
+    };
+  };
+
+  /* ---------- menú ---------- */
+  let installEv = null;
+  window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEv = e; });
+  $('#btnMenu').onclick = openMenu;
+  function openMenu() {
+    const nNew = S.pts.filter(p => p.st === 'new').length, nEd = S.pts.filter(p => p.st === 'edit').length;
+    const items = [
+      ['upload', 'Importar KMZ / KML', 'Suma o actualiza cajas desde otro archivo', 'imp'],
+      ['download', 'Exportar KMZ', 'Todo con tus cambios, listo para Google Earth', 'exp'],
+      ['cloud', 'Guardar mosaicos de esta zona', 'Opcional: fondo en línea guardado para usar sin internet', 'off'],
+      ['moon', 'Tema: ' + THEME_LABEL[S.themeMode], 'Toca para cambiar: automático, claro u oscuro', 'theme']
+    ];
+    if (installEv) items.push(['app', 'Instalar en el teléfono', 'Úsala como una app más', 'inst']);
+    items.push(['map', 'Mapa de calles sin conexión', VEC ? 'Incluido · se activa solo cuando no hay internet' : 'No incluido en esta versión', 'vecinfo']);
+    if (VEC && !NB && !S.vecSaved) items.push(['download', 'Descargar mapa de calles', 'Guarda el mapa de calles en este teléfono para usarlo sin internet', 'vecsave']);
+    items.push(['map', 'Clave de Google Maps', S.gkey ? 'Clave guardada · tocar para cambiar' : 'Necesaria para usar el mapa de Google', 'gkey']);
+    items.push(['reset', 'Restablecer datos originales', 'Borra tus cambios y vuelve al KMZ inicial', 'reset']);
+    const m = modal('<h3>Cajas GPON <small style="font-size:12px;color:var(--muted);font-weight:500">v1.3 · mapa OpenStreetMap</small></h3><div class="kpis"><div class="stat"><small>Cajas</small><b>' + S.pts.length.toLocaleString('es') + '</b></div><div class="stat"><small>Nuevas</small><b>' + nNew + '</b></div><div class="stat"><small>Editadas</small><b>' + nEd + '</b></div></div>' +
+      items.map(i => '<button class="menu-item" data-a="' + i[3] + '"><span class="mi">' + ic(i[0]) + '</span><div><b>' + i[1] + '</b><small>' + i[2] + '</small></div></button>').join(''));
+    hydrate(m);
+    m.onclick = async e => {
+      const b = e.target.closest('[data-a]'); if (!b) return; const a = b.dataset.a; closeModal();
+      if (a === 'imp') $('#fileIn').click();
+      if (a === 'exp') openExport();
+      if (a === 'off') openOffline();
+      if (a === 'gkey') askKey();
+      if (a === 'vecsave') { busy('Descargando mapa de calles…'); try { await Vec.save(VEC_URL); S.vecSaved = true; VEC = null; vecTried = false; await ensureVector(); toast('Mapa de calles guardado en el teléfono'); } catch (e) { toast('No se pudo descargar el mapa: ' + e.message, 4000); } idle(); }
+      if (a === 'vecinfo') { await ensureVector(); toast(VEC ? 'Mapa de calles listo. Se usa solo, sin internet.' : 'Esta versión no trae el mapa de calles sin conexión', 4000); }
+      if (a === 'theme') { S.themeMode = { auto: 'light', light: 'dark', dark: 'auto' }[S.themeMode]; saveSettings(); autoTheme(); toast('Tema: ' + THEME_LABEL[S.themeMode]); }
+      if (a === 'inst' && installEv) { installEv.prompt(); installEv = null; }
+      if (a === 'reset' && await confirmBox('¿Restablecer datos?', 'Se borrarán las cajas nuevas, las ediciones y los KMZ importados. Volverás al KMZ original.', 'Restablecer', true)) {
+        busy('Restableciendo…'); await DB.clear(); await loadData(); deselect(); updateNearby(); map.invalidate(); idle(); toast('Datos originales restaurados');
+      }
+    };
+  }
+
+  /* ---------- importar ---------- */
+  $('#fileIn').onchange = async e => {
+    const files = Array.from(e.target.files || []); e.target.value = ''; if (!files.length) return;
+    busy('Leyendo ' + (files.length > 1 ? files.length + ' archivos' : files[0].name) + '…');
+    try {
+      const sum = { add: 0, upd: 0, same: 0, p: 0, a: 0, l: 0, names: [] };
+      for (const file of files) {
+        await new Promise(r => setTimeout(r, 30));
+        const list = await KML.readFile(file); if (!list.length) { sum.names.push(file.name + ' (vacío)'); continue; }
+        const r = await mergeFeats(list, file.name); ['add', 'upd', 'same', 'p', 'a', 'l'].forEach(k => sum[k] += r[k]); sum.names.push(file.name);
+      }
+      reindex(); updateNearby(); map.invalidate(); idle();
+      modal('<h3>Importación lista</h3><p class="lead">' + esc(sum.names.join(', ')) + '</p><div class="kpis"><div class="stat"><small>Nuevos</small><b>' + sum.add + '</b></div><div class="stat"><small>Actualizados</small><b>' + sum.upd + '</b></div><div class="stat"><small>Sin cambios</small><b>' + sum.same + '</b></div></div>' +
+        '<p class="lead">Cajas nuevas o actualizadas: ' + sum.p + ' · áreas: ' + sum.a + ' · rutas: ' + sum.l + '.<br>Lo nuevo aparece en color morado hasta que lo exportes.</p><button class="btn accent wide" id="okI">Entendido</button>').querySelector('#okI').onclick = closeModal;
+    } catch (err) { idle(); console.error(err); modal('<h3>No se pudo importar</h3><p class="lead">' + esc(err.message || err) + '</p><button class="btn wide" id="okI">Cerrar</button>').querySelector('#okI').onclick = closeModal; }
+  };
+  async function mergeFeats(list, srcName) {
+    const r = { add: 0, upd: 0, same: 0, p: 0, a: 0, l: 0 }, toSave = [], now = Date.now(), seen = new Set();
+    const idx = new Map(); S.pts.forEach(p => { const k = norm(p.n); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(p); });
+    const sig = c => c.length + ':' + c[0].length + ':' + c[0][0][0] + ',' + c[0][0][1];
+    const gk = f => f.t + '|' + norm(f.n) + '|' + gkey(f);
+    const gidx = new Map(), gsig = new Map();
+    [...S.areas, ...S.lines].forEach(f => {
+      const k = gk(f); if (!gidx.has(k)) gidx.set(k, []); gidx.get(k).push(f); gsig.set(k + '|' + sig(f.c), f);
+    });
+    for (const n of list) {
+      if (n.t === 'p') {
+        const cands = idx.get(norm(n.n)) || []; let hit = null, bd = 1e9;
+        for (const c of cands) { if (seen.has(c.id)) continue; const d = hav(c.c[1], c.c[0], n.c[1], n.c[0]); if (d < 60 && d < bd) { bd = d; hit = c; } }
+        if (!hit && cands.some(c => seen.has(c.id) && hav(c.c[1], c.c[0], n.c[1], n.c[0]) < 3)) { r.same++; continue; }
+        if (!hit) { const sg = cands.filter(c => !seen.has(c.id) && gkey(c) === gkey(n)); if (sg.length === 1) hit = sg[0]; }
+        if (hit) {
+          seen.add(hit.id);
+          const moved = hav(hit.c[1], hit.c[0], n.c[1], n.c[0]) > 1, newD = n.d && n.d !== hit.d;
+          const newX = n.x && Object.keys(n.x).some(k => (hit.x || {})[k] !== n.x[k]);
+          if (moved || newD || newX) {
+            hit.c = n.c; if (n.d) hit.d = n.d; if (n.x) hit.x = Object.assign({}, hit.x, n.x);
+            if (hit.st !== 'new') hit.st = 'edit'; hit.ts = now; prep(hit); toSave.push(hit); r.upd++; r.p++;
+          } else r.same++;
+        } else {
+          const f = Object.assign(n, { id: S.nextId++, st: 'new', ts: now, src: srcName }); prep(f); S.feats.push(f); S.pts.push(f); seen.add(f.id);
+          if (!idx.has(norm(f.n))) idx.set(norm(f.n), []); idx.get(norm(f.n)).push(f); toSave.push(f); r.add++; r.p++;
+        }
+      } else {
+        const k = gk(n), exact = gsig.get(k + '|' + sig(n.c));
+        if (exact) { seen.add(exact.id); r.same++; continue; }
+        const list1 = (gidx.get(k) || []).filter(f => !seen.has(f.id));
+        if (list1.length === 1 && (gidx.get(k) || []).length === 1) {
+          const ex = list1[0]; seen.add(ex.id); ex.c = n.c; ex.ts = now; if (ex.st !== 'new') ex.st = 'edit'; prep(ex); toSave.push(ex); r.upd++; r[n.t]++;
+        } else {
+          const f = Object.assign(n, { id: S.nextId++, st: 'new', ts: now, src: srcName }); prep(f); S.feats.push(f); seen.add(f.id);
+          if (!gidx.has(k)) gidx.set(k, []); gidx.get(k).push(f); gsig.set(k + '|' + sig(f.c), f); toSave.push(f); r.add++; r[n.t]++;
+        }
+      }
+    }
+    if (toSave.length) await DB.putMany(toSave);
+    return r;
+  }
+
+  /* ---------- exportar ---------- */
+  function today() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function openExport() {
+    const ch = S.feats.filter(f => f.st), nP = S.pts.length;
+    let mode = 'all';
+    const m = modal('<h3>Exportar KMZ</h3><p class="lead">Archivo listo para abrir en Google Earth (con carpetas por municipio y cabina).</p>' +
+      '<button class="opt on" data-m="all"><span class="rad"></span><div><b>Todo con mis cambios</b><small>' + nP.toLocaleString('es') + ' cajas · ' + S.areas.length.toLocaleString('es') + ' áreas · ' + S.lines.length + ' rutas</small></div></button>' +
+      '<button class="opt" data-m="chg"><span class="rad"></span><div><b>Solo nuevas y editadas</b><small>' + ch.length + ' elementos</small></div></button>' +
+      '<label class="field" style="margin-top:14px"><span>NOMBRE DEL ARCHIVO</span><input id="xName" value="Cajas_ZonaNorte_' + today() + '"></label>' +
+      '<div class="btnrow"><button class="btn accent" id="xGo">' + ic('download') + 'Descargar KMZ</button>' + (navigator.canShare || NB ? '<button class="btn" id="xShare">' + ic('share') + 'Enviar</button>' : '') + '</div>');
+    hydrate(m);
+    m.onclick = e => { const o = e.target.closest('[data-m]'); if (o) { mode = o.dataset.m; m.querySelectorAll('[data-m]').forEach(x => x.classList.toggle('on', x === o)); } };
+    const make = async () => {
+      const list = mode === 'all' ? S.feats : ch; if (!list.length) { toast('No hay cambios para exportar'); return null; }
+      busy('Creando KMZ…'); await new Promise(r => setTimeout(r, 40));
+      const kml = KML.build(list, { rootName: S.seedName, docName: S.seedName + ' (actualizado ' + today() + ')' });
+      const blob = await KML.toKMZ(kml); idle();
+      const nm = (m.querySelector('#xName').value.trim() || 'Cajas').replace(/[\\/:*?"<>|]+/g, '_') + '.kmz'; return { blob, nm };
+    };
+    m.querySelector('#xGo').onclick = async () => {
+      const r = await make(); if (!r) return; saveBlob(r.blob, r.nm, false);
+      closeModal(); if (!NB) toast('KMZ listo: ' + r.nm, 1500);
+    };
+    if (m.querySelector('#xShare')) m.querySelector('#xShare').onclick = async () => {
+      const r = await make(); if (!r) return; if (NB) { saveBlob(r.blob, r.nm, true); closeModal(); return; } const file = new File([r.blob], r.nm, { type: 'application/vnd.google-earth.kmz' });
+      if (navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file], title: r.nm }); closeModal(); } catch (e) { } } else toast('Este navegador no puede enviar archivos; usa Descargar');
+    };
+  }
+
+  /* ---------- mapa sin conexión ---------- */
+  function tilesFor(center, rKm, zmin, zmax) {
+    const out = [], dLat = rKm / 110.574, dLon = rKm / (111.32 * Math.cos(center.lat * D2R));
+    for (let z = zmin; z <= zmax; z++) {
+      const n = 2 ** z, x0 = Math.floor(Merc.mxOf(center.lon - dLon) * n), x1 = Math.floor(Merc.mxOf(center.lon + dLon) * n);
+      const y0 = Math.floor(Merc.myOf(center.lat + dLat) * n), y1 = Math.floor(Merc.myOf(center.lat - dLat) * n);
+      for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) out.push([z, x, y]);
+    }
+    return out;
+  }
+  function openOffline() {
+    const b = BASES[S.base];
+    if (b && b.google) { toast('El mapa de Google no se puede guardar sin conexión. Elige Oscuro, Calles o Satélite en “Capas”.', 5000); return; }
+    if (!b || !b.url) { toast('Elige un mapa base (Oscuro, Calles o Satélite) en “Capas”'); return; }
+    if (!navigator.onLine) { toast('Necesitas conexión para descargar el mapa'); return; }
+    if (!('caches' in window)) { toast('Este navegador no permite guardar mapas'); return; }
+    const c = S.pos ? { lat: S.pos.lat, lon: S.pos.lon } : map.center(); let rad = 2, zmax = 17;
+    const m = modal('<h3>Mapa sin conexión</h3><p class="lead">Guarda el fondo (“' + esc(b.label) + '”) alrededor de ' + (S.pos ? 'tu ubicación' : 'el centro del mapa') + '. Las cajas, áreas y rutas ya funcionan sin internet.</p>' +
+      '<label class="field"><span>RADIO</span><select id="oR"><option value="1">1 km</option><option value="2" selected>2 km</option><option value="4">4 km</option></select></label>' +
+      '<label class="field"><span>DETALLE MÁXIMO</span><select id="oZ"><option value="16">Calles (zoom 16)</option><option value="17" selected>Casas (zoom 17)</option><option value="18">Máximo (zoom 18)</option></select></label>' +
+      '<p class="lead" id="oEst"></p><div class="bar" id="oBar" hidden><i></i></div><div class="btnrow"><button class="btn" id="oC">Cerrar</button><button class="btn accent" id="oGo">' + ic('cloud') + 'Descargar</button></div>');
+    hydrate(m);
+    const est = () => { rad = +m.querySelector('#oR').value; zmax = +m.querySelector('#oZ').value; const n = tilesFor(c, rad, 11, zmax).length; m.querySelector('#oEst').textContent = '≈ ' + n.toLocaleString('es') + ' mosaicos (≈ ' + Math.round(n * 18 / 1024 * 10) / 10 + ' MB). ' + (n > 1500 ? 'Es demasiado: reduce el radio o el detalle.' : ''); m.querySelector('#oGo').disabled = n > 1500; return n; };
+    m.querySelector('#oR').onchange = est; m.querySelector('#oZ').onchange = est; est();
+    let cancel = false; m.querySelector('#oC').onclick = () => { cancel = true; closeModal(); };
+    m.parentElement.querySelector('.scrim').onclick = () => { cancel = true; closeModal(); };
+    m.querySelector('#oGo').onclick = async () => {
+      const list = tilesFor(c, rad, 11, zmax), cache = await caches.open('tiles-v1'); let done = 0, fail = 0;
+      m.querySelector('#oBar').hidden = false; m.querySelector('#oGo').disabled = true;
+      const bar = m.querySelector('#oBar i'), txt = m.querySelector('#oEst');
+      let i = 0;
+      const worker = async () => {
+        while (i < list.length && !cancel) {
+          const [z, x, y] = list[i++], url = b.url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+          try { if (!(await cache.match(url, { ignoreVary: true }))) { const r = await fetch(url, { mode: 'cors' }); if (r.ok) await cache.put(url, r); else fail++; } } catch (e) { fail++; }
+          done++; if (done % 8 === 0 || done === list.length) { bar.style.width = (done / list.length * 100) + '%'; txt.textContent = done.toLocaleString('es') + ' de ' + list.length.toLocaleString('es') + ' mosaicos…'; }
+        }
+      };
+      await Promise.all(Array.from({ length: 6 }, worker));
+      if (!cancel) { txt.textContent = fail ? 'Listo, con ' + fail + ' mosaicos que no se pudieron bajar.' : '¡Listo! Esta zona ya funciona sin conexión.'; m.querySelector('#oC').textContent = 'Cerrar'; }
+    };
+  }
+
+  /* ---------- conexión ---------- */
+  function netState() { const off = isOffline(); const p = $('#pillNet'); p.hidden = !off; p.lastChild.textContent = VEC && lastMode === 'vec-auto' ? 'Sin conexión · mapa sin internet' : 'Sin conexión'; }
+  window.addEventListener('online', () => { S.netBad = false; applyBase().then(netState); });
+  window.addEventListener('offline', () => { applyBase().then(netState); });
+
+  /* ---------- arranque ---------- */
+  async function boot() {
+    hydrate(document);
+    autoTheme(); readColors(); applyBase();
+    try { await loadData(); } catch (e) { console.error(e); $('#loadMsg').textContent = 'Error al cargar los datos: ' + e.message; return; }
+    if (S.pts.length) {
+      let a = 90, c = -90, d = 180, f = -180; S.pts.forEach(p => { a = Math.min(a, p.c[1]); c = Math.max(c, p.c[1]); d = Math.min(d, p.c[0]); f = Math.max(f, p.c[0]); });
+      map.fitBounds(a, d, c, f, 30);
+    }
+    layout(); updateNearby(); netState(); applyTheme(); idle();
+    ensureVector().then(async () => { S.vecSaved = await Vec.isSaved(VEC_URL); netState(); });
+    startGpsOnce();
+    if (!NB && 'serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => { });
+    window.__back = () => {
+      if ($('#modalRoot').firstChild) { closeModal(); return true; }
+      if (S.pick) { $('#pickCancel').click(); return true; }
+      if (S.meas.on) { stopMeasure(); return true; }
+      if (!$('#results').hidden) { hideResults(); return true; }
+      if (S.sel) { deselect(); return true; }
+      if ($('#nearby').dataset.state === 'full') { $('#nearby').dataset.state = 'peek'; return true; }
+      return false;
+    };
+    setInterval(autoTheme, 60000);
+    window.__app = { sunTimes, autoTheme, S, map, select, openForm };
+  }
+  boot();
+})();
